@@ -91,6 +91,7 @@ class StyleTransferTrainer:
         self._setup_models()
         self._setup_data()
         self._setup_training()
+        self._setup_statistics()
     
     def _setup_directories(self):
         """Создает необходимые директории"""
@@ -98,6 +99,70 @@ class StyleTransferTrainer:
         os.makedirs(self.stats_dir, exist_ok=True)
         os.makedirs(os.path.join(self.models_dir, "G_A2B"), exist_ok=True)
         os.makedirs(os.path.join(self.models_dir, "G_B2A"), exist_ok=True)
+    
+    def _setup_statistics(self):
+        """Настраивает систему сбора статистики"""
+        # Создаем подпапки для статистики
+        self.losses_dir = os.path.join(self.stats_dir, "losses")
+        self.metrics_dir = os.path.join(self.stats_dir, "metrics")
+        self.checkpoints_dir = os.path.join(self.stats_dir, "checkpoints")
+        self.visual_dir = os.path.join(self.stats_dir, "visual_progress")
+        
+        os.makedirs(self.losses_dir, exist_ok=True)
+        os.makedirs(self.metrics_dir, exist_ok=True)
+        os.makedirs(self.checkpoints_dir, exist_ok=True)
+        os.makedirs(self.visual_dir, exist_ok=True)
+        
+        # Инициализируем историю статистики
+        self.statistics = {
+            'epochs': [],
+            'losses': {
+                'G': [], 'D_A': [], 'D_B': [],
+                'G_GAN_A2B': [], 'G_GAN_B2A': [],
+                'G_cycle_ABA': [], 'G_cycle_BAB': [],
+                'G_identity_A': [], 'G_identity_B': []
+            },
+            'timing': {
+                'epoch_times': [],
+                'batch_times': [],
+                'total_time': 0
+            },
+            'data_info': {
+                'dataset_A_size': len(self.dataset_A),
+                'dataset_B_size': len(self.dataset_B),
+                'image_size': self.image_size,
+                'batch_size': self.batch_size
+            }
+        }
+        
+        # Сохраняем конфигурацию обучения
+        self._save_training_config()
+    
+    def _save_training_config(self):
+        """Сохраняет конфигурацию обучения"""
+        config = {
+            'image_size': self.image_size,
+            'batch_size': self.batch_size,
+            'epochs': self.epochs,
+            'learning_rate': self.lr,
+            'lambda_cycle': self.lambda_cycle,
+            'lambda_identity': self.lambda_identity,
+            'n_residual_blocks': self.n_residual_blocks,
+            'use_dropout': self.use_dropout,
+            'gradient_clip': self.gradient_clip,
+            'device': str(self.device),
+            'dataset_A_path': self.dataset_a_path,
+            'dataset_B_path': self.dataset_b_path,
+            'dataset_A_size': len(self.dataset_A),
+            'dataset_B_size': len(self.dataset_B),
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        config_path = os.path.join(self.stats_dir, "training_config.json")
+        with open(config_path, 'w', encoding='utf-8') as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+        
+        self._log(f"💾 Конфигурация обучения сохранена: {config_path}")
     
     def _log(self, message):
         """Логирует сообщение"""
@@ -172,27 +237,25 @@ class StyleTransferTrainer:
         )
         self.optimizer_D_A = optim.Adam(self.D_A.parameters(), lr=self.lr, betas=(0.5, 0.999))
         self.optimizer_D_B = optim.Adam(self.D_B.parameters(), lr=self.lr, betas=(0.5, 0.999))
-        
-        # Статистика
-        self.losses = {
-            'G': [], 'D_A': [], 'D_B': [],
-            'G_GAN_A2B': [], 'G_GAN_B2A': [],
-            'G_cycle_ABA': [], 'G_cycle_BAB': [],
-            'G_identity_A': [], 'G_identity_B': []
-        }
     
     def train(self):
         """Запускает обучение"""
         self._log("🚀 Начало обучения...")
         self._log(f"📊 Всего батчей за эпоху: {min(len(self.dataloader_A), len(self.dataloader_B))}")
         
+        start_time = datetime.now()
+        
         for epoch in range(1, self.epochs + 1):
             if self.stop_training:
                 self._log("⏹️ Обучение остановлено пользователем")
                 break
             
+            epoch_start = datetime.now()
             epoch_losses = self._train_epoch(epoch)
-            self._update_statistics(epoch, epoch_losses)
+            epoch_time = (datetime.now() - epoch_start).total_seconds()
+            
+            self._update_statistics(epoch, epoch_losses, epoch_time)
+            self._save_epoch_statistics(epoch)
             
             # Сохранение моделей
             if epoch % self.save_interval == 0 or epoch == self.epochs:
@@ -203,7 +266,12 @@ class StyleTransferTrainer:
                 total_loss = epoch_losses['G']
                 self.progress_callback(epoch, self.epochs, total_loss)
         
+        total_time = (datetime.now() - start_time).total_seconds()
+        self.statistics['timing']['total_time'] = total_time
+        self._save_final_statistics()
+        
         self._log("✅ Обучение завершено!")
+        self._log(f"⏱️  Общее время обучения: {total_time:.2f} секунд")
     
     def _train_epoch(self, epoch):
         """Одна эпоха обучения"""
@@ -341,10 +409,72 @@ class StyleTransferTrainer:
         
         return losses
     
-    def _update_statistics(self, epoch, epoch_losses):
+    def _update_statistics(self, epoch, epoch_losses, epoch_time):
         """Обновляет статистику обучения"""
+        self.statistics['epochs'].append(epoch)
+        self.statistics['timing']['epoch_times'].append(epoch_time)
+        
         for key, value in epoch_losses.items():
-            self.losses[key].append(value)
+            self.statistics['losses'][key].append(value)
+    
+    def _save_epoch_statistics(self, epoch):
+        """Сохраняет статистику эпохи"""
+        # Сохраняем losses в CSV
+        losses_csv_path = os.path.join(self.losses_dir, "losses_history.csv")
+        file_exists = os.path.isfile(losses_csv_path)
+        
+        with open(losses_csv_path, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            if not file_exists:
+                writer.writerow(['epoch', 'G_loss', 'D_A_loss', 'D_B_loss', 
+                               'G_GAN_A2B', 'G_GAN_B2A', 'G_cycle_ABA', 'G_cycle_BAB',
+                               'G_identity_A', 'G_identity_B', 'epoch_time'])
+            
+            writer.writerow([
+                epoch,
+                self.statistics['losses']['G'][-1],
+                self.statistics['losses']['D_A'][-1],
+                self.statistics['losses']['D_B'][-1],
+                self.statistics['losses']['G_GAN_A2B'][-1],
+                self.statistics['losses']['G_GAN_B2A'][-1],
+                self.statistics['losses']['G_cycle_ABA'][-1],
+                self.statistics['losses']['G_cycle_BAB'][-1],
+                self.statistics['losses']['G_identity_A'][-1],
+                self.statistics['losses']['G_identity_B'][-1],
+                self.statistics['timing']['epoch_times'][-1]
+            ])
+        
+        # Сохраняем полную статистику каждые 10 эпох
+        if epoch % 10 == 0:
+            stats_path = os.path.join(self.metrics_dir, f"statistics_epoch_{epoch:03d}.json")
+            with open(stats_path, 'w', encoding='utf-8') as f:
+                json.dump(self.statistics, f, indent=2, ensure_ascii=False)
+    
+    def _save_final_statistics(self):
+        """Сохраняет финальную статистику"""
+        # Финальная статистика
+        final_stats_path = os.path.join(self.stats_dir, "final_statistics.json")
+        with open(final_stats_path, 'w', encoding='utf-8') as f:
+            json.dump(self.statistics, f, indent=2, ensure_ascii=False)
+        
+        # Сводный отчет
+        summary_path = os.path.join(self.stats_dir, "training_summary.txt")
+        with open(summary_path, 'w', encoding='utf-8') as f:
+            f.write("ОБУЧЕНИЕ CYCLEGAN - СВОДНЫЙ ОТЧЕТ\n")
+            f.write("=" * 50 + "\n\n")
+            f.write(f"Дата обучения: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Общее время: {self.statistics['timing']['total_time']:.2f} секунд\n")
+            f.write(f"Количество эпох: {len(self.statistics['epochs'])}\n")
+            f.write(f"Размер датасета A: {self.statistics['data_info']['dataset_A_size']}\n")
+            f.write(f"Размер датасета B: {self.statistics['data_info']['dataset_B_size']}\n\n")
+            
+            if self.statistics['losses']['G']:
+                f.write("ФИНАЛЬНЫЕ ПОТЕРИ:\n")
+                f.write(f"  Generator Loss: {self.statistics['losses']['G'][-1]:.4f}\n")
+                f.write(f"  Discriminator A Loss: {self.statistics['losses']['D_A'][-1]:.4f}\n")
+                f.write(f"  Discriminator B Loss: {self.statistics['losses']['D_B'][-1]:.4f}\n")
+        
+        self._log(f"💾 Финальная статистика сохранена в: {self.stats_dir}")
     
     def _save_models(self, epoch):
         """Сохраняет модели"""
