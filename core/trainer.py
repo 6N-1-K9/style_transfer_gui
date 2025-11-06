@@ -47,7 +47,7 @@ class StyleTransferTrainer:
                  use_dropout=True, gradient_clip=1.0, lr_decay_start=50,
                  lr_decay_end=150, final_lr_ratio=0.1, use_early_stopping=True,
                  early_stopping_patience=20, save_interval=10,
-                 log_callback=None, progress_callback=None):
+                 log_callback=None, progress_callback=None, resume_from=None):
         
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.dataset_a_path = dataset_a_path
@@ -76,22 +76,29 @@ class StyleTransferTrainer:
         self.progress_callback = progress_callback
         self.stop_training = False
         
-        # Логируем реальные настройки
-        self._log("⚙️  ПРИМЕНЕННЫЕ НАСТРОЙКИ:")
-        self._log(f"   Размер изображения: {self.image_size}px")
-        self._log(f"   Batch size: {self.batch_size}")
-        self._log(f"   Эпохи: {self.epochs}")
-        self._log(f"   Learning Rate: {self.lr}")
-        self._log(f"   Lambda Cycle: {self.lambda_cycle}")
-        self._log(f"   Lambda Identity: {self.lambda_identity}")
-        self._log(f"   Residual Blocks: {self.n_residual_blocks}")
-        self._log(f"   Устройство: {self.device}")
-        
-        self._setup_directories()
-        self._setup_models()
-        self._setup_data()
-        self._setup_training()
-        self._setup_statistics()
+        # Если передан чекпоинт для возобновления
+        if resume_from:
+            self._load_from_checkpoint(resume_from)
+        else:
+            # Логируем реальные настройки
+            self._log("⚙️  ПРИМЕНЕННЫЕ НАСТРОЙКИ:")
+            self._log(f"   Размер изображения: {self.image_size}px")
+            self._log(f"   Batch size: {self.batch_size}")
+            self._log(f"   Эпохи: {self.epochs}")
+            self._log(f"   Learning Rate: {self.lr}")
+            self._log(f"   Lambda Cycle: {self.lambda_cycle}")
+            self._log(f"   Lambda Identity: {self.lambda_identity}")
+            self._log(f"   Residual Blocks: {self.n_residual_blocks}")
+            self._log(f"   Устройство: {self.device}")
+            
+            self._setup_directories()
+            self._setup_models()
+            self._setup_data()
+            self._setup_training()
+            self._setup_statistics()
+            
+            # Сохраняем настройки при инициализации (только для нового обучения)
+            self._save_training_settings()
     
     def _setup_directories(self):
         """Создает необходимые директории"""
@@ -100,43 +107,50 @@ class StyleTransferTrainer:
         os.makedirs(os.path.join(self.models_dir, "G_A2B"), exist_ok=True)
         os.makedirs(os.path.join(self.models_dir, "G_B2A"), exist_ok=True)
     
+    def _save_training_settings(self):
+        """Сохраняет настройки обучения в файл"""
+        try:
+            from utils.settings_utils import TrainingSettings, get_settings_path
+            
+            settings_path = get_settings_path(self.models_dir)
+            settings = TrainingSettings()
+            if settings.save(settings_path, self):
+                self._log(f"💾 Настройки обучения сохранены: {os.path.basename(settings_path)}")
+            
+        except Exception as e:
+            self._log(f"❌ Ошибка сохранения настроек: {e}")
+    
     def _setup_statistics(self):
         """Настраивает систему сбора статистики"""
-        # Создаем подпапки для статистики
-        self.losses_dir = os.path.join(self.stats_dir, "losses")
-        self.metrics_dir = os.path.join(self.stats_dir, "metrics")
-        self.checkpoints_dir = os.path.join(self.stats_dir, "checkpoints")
-        self.visual_dir = os.path.join(self.stats_dir, "visual_progress")
+        # Создаем директории для статистики
+        self._setup_statistics_directories()
         
-        os.makedirs(self.losses_dir, exist_ok=True)
-        os.makedirs(self.metrics_dir, exist_ok=True)
-        os.makedirs(self.checkpoints_dir, exist_ok=True)
-        os.makedirs(self.visual_dir, exist_ok=True)
-        
-        # Инициализируем историю статистики
-        self.statistics = {
-            'epochs': [],
-            'losses': {
-                'G': [], 'D_A': [], 'D_B': [],
-                'G_GAN_A2B': [], 'G_GAN_B2A': [],
-                'G_cycle_ABA': [], 'G_cycle_BAB': [],
-                'G_identity_A': [], 'G_identity_B': []
-            },
-            'timing': {
-                'epoch_times': [],
-                'batch_times': [],
-                'total_time': 0
-            },
-            'data_info': {
-                'dataset_A_size': len(self.dataset_A),
-                'dataset_B_size': len(self.dataset_B),
-                'image_size': self.image_size,
-                'batch_size': self.batch_size
+        # Инициализируем историю статистики (только для нового обучения)
+        if not hasattr(self, 'statistics') or not self.statistics:
+            self.statistics = {
+                'epochs': [],
+                'losses': {
+                    'G': [], 'D_A': [], 'D_B': [],
+                    'G_GAN_A2B': [], 'G_GAN_B2A': [],
+                    'G_cycle_ABA': [], 'G_cycle_BAB': [],
+                    'G_identity_A': [], 'G_identity_B': []
+                },
+                'timing': {
+                    'epoch_times': [],
+                    'batch_times': [],
+                    'total_time': 0
+                },
+                'data_info': {
+                    'dataset_A_size': len(self.dataset_A),
+                    'dataset_B_size': len(self.dataset_B),
+                    'image_size': self.image_size,
+                    'batch_size': self.batch_size
+                }
             }
-        }
         
-        # Сохраняем конфигурацию обучения
-        self._save_training_config()
+        # Сохраняем конфигурацию обучения (только для нового обучения)
+        if not hasattr(self, 'start_epoch') or self.start_epoch == 1:
+            self._save_training_config()
     
     def _save_training_config(self):
         """Сохраняет конфигурацию обучения"""
@@ -163,6 +177,161 @@ class StyleTransferTrainer:
             json.dump(config, f, indent=2, ensure_ascii=False)
         
         self._log(f"💾 Конфигурация обучения сохранена: {config_path}")
+    
+    def _load_from_checkpoint(self, checkpoint_path):
+        """Загружает состояние из чекпоинта"""
+        self._log(f"🔄 Загрузка чекпоинта: {checkpoint_path}")
+        
+        try:
+            checkpoint = torch.load(checkpoint_path, map_location=self.device)
+            
+            # Восстанавливаем настройки
+            config = checkpoint['training_config']
+            self.image_size = config['image_size']
+            self.batch_size = config['batch_size']
+            self.epochs = config['epochs']
+            self.lr = config['learning_rate']
+            self.lambda_cycle = config['lambda_cycle']
+            self.lambda_identity = config['lambda_identity']
+            self.n_residual_blocks = config['n_residual_blocks']
+            self.use_dropout = config['use_dropout']
+            self.gradient_clip = config['gradient_clip']
+            
+            # Восстанавливаем пути
+            self.dataset_a_path = config['dataset_A_path']
+            self.dataset_b_path = config['dataset_B_path']
+            self.models_dir = checkpoint['models_dir']
+            self.stats_dir = checkpoint['stats_dir']
+            
+            # Настраиваем директории и данные
+            self._setup_directories()
+            self._setup_data()
+            
+            # Инициализируем модели
+            self._setup_models()
+            
+            # Восстанавливаем состояние моделей
+            self.G_A2B.load_state_dict(checkpoint['G_A2B_state'])
+            self.G_B2A.load_state_dict(checkpoint['G_B2A_state'])
+            self.D_A.load_state_dict(checkpoint['D_A_state'])
+            self.D_B.load_state_dict(checkpoint['D_B_state'])
+            
+            # Настраиваем обучение
+            self._setup_training()
+            
+            # Восстанавливаем состояние оптимизаторов
+            self.optimizer_G.load_state_dict(checkpoint['optimizer_G_state'])
+            self.optimizer_D_A.load_state_dict(checkpoint['optimizer_D_A_state'])
+            self.optimizer_D_B.load_state_dict(checkpoint['optimizer_D_B_state'])
+            
+            # Восстанавливаем статистику
+            self.statistics = checkpoint['statistics']
+            self.start_epoch = checkpoint['current_epoch'] + 1
+            
+            # ВАЖНО: Настраиваем систему статистики после загрузки чекпоинта
+            self._setup_statistics_directories()
+            
+            self._log(f"✅ Чекпоинт загружен. Продолжаем с эпохи {self.start_epoch}")
+            self._log(f"📊 Пройдено эпох: {checkpoint['current_epoch']}/{self.epochs}")
+            
+        except Exception as e:
+            self._log(f"❌ Ошибка загрузки чекпоинта: {e}")
+            raise
+
+    def _setup_statistics_directories(self):
+        """Создает директории для статистики (для случая загрузки из чекпоинта)"""
+        # Создаем подпапки для статистики
+        self.losses_dir = os.path.join(self.stats_dir, "losses")
+        self.metrics_dir = os.path.join(self.stats_dir, "metrics")
+        self.checkpoints_dir = os.path.join(self.stats_dir, "checkpoints")
+        self.visual_dir = os.path.join(self.stats_dir, "visual_progress")
+        
+        os.makedirs(self.losses_dir, exist_ok=True)
+        os.makedirs(self.metrics_dir, exist_ok=True)
+        os.makedirs(self.checkpoints_dir, exist_ok=True)
+        os.makedirs(self.visual_dir, exist_ok=True)
+    
+    def _should_save_checkpoint(self, epoch):
+        """Определяет, нужно ли сохранять чекпоинт (каждые 25% эпох)"""
+        if epoch == self.epochs:  # Всегда сохраняем на последней эпохе
+            self._log(f"📋 Сохранение чекпоинта на последней эпохе: {epoch}")
+            return True
+        
+        checkpoint_points = [
+            int(self.epochs * 0.25),
+            int(self.epochs * 0.5), 
+            int(self.epochs * 0.75)
+        ]
+        
+        should_save = epoch in checkpoint_points
+        
+        if should_save:
+            self._log(f"📋 Точка сохранения чекпоинта: эпоха {epoch} (точки: {checkpoint_points})")
+        
+        return should_save
+    
+    def _save_checkpoint(self, epoch):
+        """Сохраняет полный чекпоинт обучения"""
+        try:
+            checkpoint = {
+                # Метаданные
+                'current_epoch': epoch,
+                'models_dir': self.models_dir,
+                'stats_dir': self.stats_dir,
+                'timestamp': datetime.now().isoformat(),
+                
+                # Состояние моделей
+                'G_A2B_state': self.G_A2B.state_dict(),
+                'G_B2A_state': self.G_B2A.state_dict(),
+                'D_A_state': self.D_A.state_dict(),
+                'D_B_state': self.D_B.state_dict(),
+                
+                # Состояние оптимизаторов
+                'optimizer_G_state': self.optimizer_G.state_dict(),
+                'optimizer_D_A_state': self.optimizer_D_A.state_dict(),
+                'optimizer_D_B_state': self.optimizer_D_B.state_dict(),
+                
+                # Статистика обучения
+                'statistics': self.statistics,
+                
+                # Конфигурация
+                'training_config': {
+                    'image_size': self.image_size,
+                    'batch_size': self.batch_size,
+                    'epochs': self.epochs,
+                    'learning_rate': self.lr,
+                    'lambda_cycle': self.lambda_cycle,
+                    'lambda_identity': self.lambda_identity,
+                    'n_residual_blocks': self.n_residual_blocks,
+                    'use_dropout': self.use_dropout,
+                    'gradient_clip': self.gradient_clip,
+                    'device': str(self.device),
+                    'dataset_A_path': self.dataset_a_path,
+                    'dataset_B_path': self.dataset_b_path,
+                    'dataset_A_size': len(self.dataset_A),
+                    'dataset_B_size': len(self.dataset_B),
+                }
+            }
+            
+            # Создаем папку checkpoints если не существует
+            os.makedirs(self.checkpoints_dir, exist_ok=True)
+            
+            checkpoint_path = os.path.join(self.checkpoints_dir, "checkpoint_latest.pth")
+            
+            # Сохраняем чекпоинт
+            torch.save(checkpoint, checkpoint_path)
+            
+            self._log(f"💾 Чекпоинт сохранен (эпоха {epoch}): {checkpoint_path}")
+            self._log(f"📏 Размер чекпоинта: {os.path.getsize(checkpoint_path)} байт")
+            
+            # Проверяем, что файл действительно создан
+            if os.path.exists(checkpoint_path):
+                self._log("✅ Чекпоинт успешно создан и проверен")
+            else:
+                self._log("❌ Ошибка: чекпоинт не создан")
+                
+        except Exception as e:
+            self._log(f"❌ Ошибка сохранения чекпоинта: {e}")
     
     def _log(self, message):
         """Логирует сообщение"""
@@ -245,10 +414,16 @@ class StyleTransferTrainer:
         
         start_time = datetime.now()
         
-        for epoch in range(1, self.epochs + 1):
+        # Определяем начальную эпоху (для resume)
+        start_epoch = getattr(self, 'start_epoch', 1)
+        self.current_epoch = start_epoch  # Отслеживаем текущую эпоху
+        
+        for epoch in range(start_epoch, self.epochs + 1):
             if self.stop_training:
                 self._log("⏹️ Обучение остановлено пользователем")
                 break
+            
+            self.current_epoch = epoch  # Обновляем текущую эпоху
             
             epoch_start = datetime.now()
             epoch_losses = self._train_epoch(epoch)
@@ -260,6 +435,10 @@ class StyleTransferTrainer:
             # Сохранение моделей
             if epoch % self.save_interval == 0 or epoch == self.epochs:
                 self._save_models(epoch)
+            
+            # Сохранение чекпоинта (каждые 25% эпох)
+            if self._should_save_checkpoint(epoch):
+                self._save_checkpoint(epoch)
             
             # Колбэк прогресса (ВЫЗЫВАЕМ ПОСЛЕ КАЖДОЙ ЭПОХИ)
             if self.progress_callback:
@@ -419,6 +598,10 @@ class StyleTransferTrainer:
     
     def _save_epoch_statistics(self, epoch):
         """Сохраняет статистику эпохи"""
+        # Проверяем, что директории существуют
+        if not hasattr(self, 'losses_dir'):
+            self._setup_statistics_directories()
+        
         # Сохраняем losses в CSV
         losses_csv_path = os.path.join(self.losses_dir, "losses_history.csv")
         file_exists = os.path.isfile(losses_csv_path)
@@ -427,8 +610,8 @@ class StyleTransferTrainer:
             writer = csv.writer(f)
             if not file_exists:
                 writer.writerow(['epoch', 'G_loss', 'D_A_loss', 'D_B_loss', 
-                               'G_GAN_A2B', 'G_GAN_B2A', 'G_cycle_ABA', 'G_cycle_BAB',
-                               'G_identity_A', 'G_identity_B', 'epoch_time'])
+                            'G_GAN_A2B', 'G_GAN_B2A', 'G_cycle_ABA', 'G_cycle_BAB',
+                            'G_identity_A', 'G_identity_B', 'epoch_time'])
             
             writer.writerow([
                 epoch,

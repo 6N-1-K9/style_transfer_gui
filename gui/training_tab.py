@@ -1,11 +1,13 @@
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 import threading
 import os
+import torch
 from .widgets import PathSelector, LogWidget
 from utils.file_utils import get_model_files, create_directory
 from core.trainer import StyleTransferTrainer
 from utils.config import TrainingConfig
+from utils.settings_utils import TrainingSettings, find_latest_checkpoint, find_latest_model, validate_resume_files, get_settings_path
 
 class TrainingTab(ttk.Frame):
     def __init__(self, parent):
@@ -220,6 +222,9 @@ class TrainingTab(ttk.Frame):
         self.start_btn = ttk.Button(button_frame, text="Начать обучение", command=self.start_training)
         self.start_btn.pack(side="left", padx=(0, 5))
         
+        self.resume_btn = ttk.Button(button_frame, text="Продолжить обучение", command=self.resume_training)
+        self.resume_btn.pack(side="left", padx=(0, 5))
+        
         self.stop_btn = ttk.Button(button_frame, text="Остановить", command=self.stop_training, state="disabled")
         self.stop_btn.pack(side="left")
         
@@ -298,6 +303,143 @@ class TrainingTab(ttk.Frame):
         except ValueError as e:
             raise ValueError(f"Некорректное значение в настройках: {e}")
     
+    def _update_ui_from_settings(self, settings):
+        """Обновляет UI с настройками из файла"""
+        config = settings.training_config
+        paths = settings.paths
+        
+        # Обновляем пути
+        self.dataset_a_selector.set_path(paths['dataset_a'])
+        self.dataset_b_selector.set_path(paths['dataset_b'])
+        self.models_selector.set_path(paths['models_dir'])
+        self.stats_selector.set_path(paths['stats_dir'])
+        
+        # Обновляем настройки
+        self.image_size_var.set(str(config['image_size']))
+        self.batch_size_var.set(str(config['batch_size']))
+        self.epochs_var.set(str(config['epochs']))
+        self.lr_var.set(str(config['lr']))
+        self.lambda_cycle_var.set(str(config['lambda_cycle']))
+        self.lambda_identity_var.set(str(config['lambda_identity']))
+        self.n_residual_blocks_var.set(str(config['n_residual_blocks']))
+        self.use_dropout_var.set(config['use_dropout'])
+        self.gradient_clip_var.set(str(config['gradient_clip']))
+        self.lr_decay_start_var.set(str(config['lr_decay_start']))
+        self.lr_decay_end_var.set(str(config['lr_decay_end']))
+        self.final_lr_ratio_var.set(str(config['final_lr_ratio']))
+        self.use_early_stopping_var.set(config['use_early_stopping'])
+        self.early_stopping_patience_var.set(str(config['early_stopping_patience']))
+        self.save_interval_var.set(str(config['save_interval']))
+    
+    def resume_training(self):
+        """Продолжает обучение с последней точки"""
+        if self.is_training:
+            return
+        
+        # Запрашиваем файл настроек с ПРАВИЛЬНЫМ фильтром
+        settings_path = filedialog.askopenfilename(
+            title="Выберите файл настроек обучения (training_settings.json)",
+            filetypes=[
+                ("JSON files", "*.json"),
+                ("Training settings", "training_settings.json"),
+                ("All files", "*.*")
+            ],
+            initialdir=os.path.abspath("data/models")
+        )
+        
+        if not settings_path:
+            return
+        
+        # Проверяем, что файл существует и имеет правильное расширение
+        if not os.path.exists(settings_path):
+            messagebox.showerror("Ошибка", f"Файл не существует: {settings_path}")
+            return
+        
+        if not settings_path.lower().endswith('.json'):
+            messagebox.showerror("Ошибка", "Выберите файл с расширением .json")
+            return
+        
+        # Загружаем настройки
+        settings = TrainingSettings()
+        if not settings.load(settings_path):
+            messagebox.showerror("Ошибка", "Не удалось загрузить файл настроек. Файл поврежден или имеет неверный формат.")
+            return
+        
+        # Находим последний чекпоинт или модель
+        models_dir = settings.paths['models_dir']
+        stats_dir = settings.paths['stats_dir']
+        
+        # Логируем информацию для отладки
+        self.log_widget.log(f"🔍 Поиск чекпоинтов в: {stats_dir}")
+        self.log_widget.log(f"🔍 Поиск моделей в: {models_dir}")
+        
+        checkpoint_path = find_latest_checkpoint(stats_dir)
+        if not checkpoint_path:
+            self.log_widget.log("ℹ️ Чекпоинт не найден, ищем последнюю модель...")
+            checkpoint_path = find_latest_model(models_dir)
+        
+        if checkpoint_path:
+            self.log_widget.log(f"✅ Найден файл для продолжения: {os.path.basename(checkpoint_path)}")
+        else:
+            self.log_widget.log("❌ Не найден ни чекпоинт, ни модель для продолжения")
+        
+        # Проверяем валидность файлов
+        is_valid, errors = validate_resume_files(settings_path, checkpoint_path)
+        if not is_valid:
+            error_message = "\n".join(errors)
+            messagebox.showerror("Ошибка", f"Не удалось начать продолжение обучения:\n{error_message}")
+            return
+        
+        # Обновляем UI с настройками из файла
+        self._update_ui_from_settings(settings)
+        
+        # Настраиваем UI
+        self.is_training = True
+        self.start_btn.config(state="disabled")
+        self.resume_btn.config(state="disabled")
+        self.stop_btn.config(state="normal")
+        self.progress_var.set(0)
+        self.progress_label.config(text="Подготовка к продолжению обучения...")
+        self.log_widget.clear()
+        
+        self.log_widget.log("🔄 Продолжение обучения...")
+        self.log_widget.log(f"📁 Настройки: {os.path.basename(settings_path)}")
+        self.log_widget.log(f"📁 Чекпоинт: {os.path.basename(checkpoint_path)}")
+        self.log_widget.log(f"📊 Продолжаем с эпохи: {settings.model_info.get('current_epoch', 1)}")
+        
+        # Запускаем обучение в отдельном потоке с чекпоинтом
+        self.training_thread = threading.Thread(
+            target=self._resume_training_worker, 
+            args=(settings, checkpoint_path),
+            daemon=True
+        )
+        self.training_thread.start()
+    
+    def _resume_training_worker(self, settings, checkpoint_path):
+        """Рабочая функция для продолжения обучения в отдельном потоке"""
+        try:
+            # Создаем тренер с загрузкой из чекпоинта
+            self.trainer = StyleTransferTrainer(
+                dataset_a_path=settings.paths['dataset_a'],
+                dataset_b_path=settings.paths['dataset_b'],
+                models_dir=settings.paths['models_dir'],
+                stats_dir=settings.paths['stats_dir'],
+                **settings.training_config,
+                resume_from=checkpoint_path,
+                log_callback=self.log_widget.log,
+                progress_callback=self.update_progress
+            )
+            
+            # Продолжаем обучение
+            self.trainer.train()
+            
+        except Exception as e:
+            self.log_widget.log(f"❌ Ошибка продолжения обучения: {str(e)}")
+        
+        finally:
+            self.is_training = False
+            self.after(0, self._training_finished)
+    
     def start_training(self):
         """Запускает обучение в отдельном потоке"""
         if self.is_training:
@@ -341,6 +483,7 @@ class TrainingTab(ttk.Frame):
         # Настраиваем UI
         self.is_training = True
         self.start_btn.config(state="disabled")
+        self.resume_btn.config(state="disabled")
         self.stop_btn.config(state="normal")
         self.progress_var.set(0)
         self.progress_label.config(text="Подготовка к обучению...")
@@ -400,6 +543,7 @@ class TrainingTab(ttk.Frame):
     def _training_finished(self):
         """Вызывается когда обучение завершено"""
         self.start_btn.config(state="normal")
+        self.resume_btn.config(state="normal")
         self.stop_btn.config(state="disabled")
         self.progress_label.config(text="Обучение завершено")
         self.refresh_models_list()
