@@ -75,9 +75,9 @@ class TrainingTab(ttk.Frame):
         self.stats_selector.pack(fill="x", pady=5)
         
         # Информация об обязательных полях
-        required_label = ttk.Label(scrollable_left_frame, text="* - обязательные поля", 
-                                 foreground="red", font=("Arial", 8))
-        required_label.pack(anchor="w", pady=(0, 10))
+        #required_label = ttk.Label(scrollable_left_frame, text="* - обязательные поля", 
+        #                         foreground="red", font=("Arial", 8))
+        #required_label.pack(anchor="w", pady=(0, 10))
         
         # НАСТРОЙКИ ОБУЧЕНИЯ
         settings_frame = ttk.LabelFrame(scrollable_left_frame, text="Основные настройки обучения")
@@ -140,7 +140,7 @@ class TrainingTab(ttk.Frame):
         self.n_residual_blocks_var = tk.StringVar(value=str(self.config.n_residual_blocks))
         n_residual_blocks_entry = ttk.Entry(advanced_frame, textvariable=self.n_residual_blocks_var, width=10)
         n_residual_blocks_entry.grid(row=row_adv, column=1, sticky="w", padx=5, pady=2)
-        ttk.Label(advanced_frame, text="(6, 9, 12...)", font=("Arial", 8)).grid(row=row_adv, column=2, sticky="w", padx=(0, 5), pady=2)
+        #ttk.Label(advanced_frame, text="(6, 9, 12...)", font=("Arial", 8)).grid(row=row_adv, column=2, sticky="w", padx=(0, 5), pady=2)
         row_adv += 1
         
         # Use Dropout
